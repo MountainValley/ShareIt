@@ -1,5 +1,6 @@
 package com.valley.ShareIt.controller;
 
+import com.valley.ShareIt.support.WorkSpaceDirectory;
 import com.valley.ShareIt.utils.FileUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -33,7 +34,6 @@ import java.util.stream.Stream;
 @RequestMapping("file")
 public class MainController {
     private static final Log logger = LogFactory.getLog(MainController.class);
-    private static final String BASE_DIR = System.getenv().get("SHARE_IT_FROM");
 
     @Value("${disk.free.space.more.than}")
     private long diskFreeSpaceConfig;
@@ -49,7 +49,7 @@ public class MainController {
         // 文件信息列表
         List<Map<String, Object>> fileList = new ArrayList<>();
 
-        try (Stream<Path> paths = Files.walk(Path.of(BASE_DIR))) {
+        try (Stream<Path> paths = Files.walk(Path.of(WorkSpaceDirectory.getWorkDir()))) {
             paths.filter(Files::isRegularFile) // 过滤掉非文件（如目录）
                     .forEach(path -> {
                         try {
@@ -77,7 +77,7 @@ public class MainController {
 
             return fileList;
         } catch (IOException e) {
-            logger.error("无法扫描目录: " + BASE_DIR, e);
+            logger.error("无法扫描目录: " + WorkSpaceDirectory.getWorkDir(), e);
         }
         return null;
     }
@@ -85,7 +85,7 @@ public class MainController {
     @GetMapping("/download/{filename}")
     public ResponseEntity<Resource> downloadFile(@PathVariable String filename) throws IOException {
         filename = URLDecoder.decode(filename, StandardCharsets.UTF_8);
-        File file = new File(BASE_DIR, filename);
+        File file = new File(WorkSpaceDirectory.getWorkDir(), filename);
 
         if (!file.exists()) {
             // 如果文件不存在，返回 404 错误
@@ -95,9 +95,17 @@ public class MainController {
         // 创建文件资源
         Resource resource = new FileSystemResource(file);
 
+        // 兼容 ASCII 的 fallback 名（比如转为拼音、数字、uuid等简单英文名）
+        String fallbackName = "download.pdf";
+
+        // 对中文名做 UTF-8 URL 编码，并替换 + 为 %20
+        String encodedFilename = URLEncoder.encode(filename, StandardCharsets.UTF_8).replaceAll("\\+", "%20");
+
         // 设置响应头，告诉浏览器这是一个下载文件
         HttpHeaders headers = new HttpHeaders();
-        headers.add(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"");
+        // headers.add(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"");
+        headers.add(HttpHeaders.CONTENT_DISPOSITION,
+            "attachment; filename=\"" + fallbackName + "\"; filename*=UTF-8''" + encodedFilename);
         headers.add(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_OCTET_STREAM_VALUE);
 
         return ResponseEntity.ok()
@@ -117,7 +125,7 @@ public class MainController {
 
         try {
             // 保存文件到指定目录
-            String filePath = Paths.get(BASE_DIR, file.getOriginalFilename()).toString();
+            String filePath = Paths.get(WorkSpaceDirectory.getWorkDir(), file.getOriginalFilename()).toString();
             Files.write(Paths.get(filePath), file.getBytes());
             return ResponseEntity.ok("文件上传成功！");
         } catch (IOException e) {
@@ -127,6 +135,6 @@ public class MainController {
     }
 
     private boolean haveEnoughSpace(long size) {
-        return (FileUtils.getFreeSpace(BASE_DIR) - size) <= diskFreeSpaceConfig;
+        return (FileUtils.getFreeSpace(WorkSpaceDirectory.getWorkDir()) - size) <= diskFreeSpaceConfig;
     }
 }
