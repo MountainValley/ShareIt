@@ -24,6 +24,7 @@ public class WorkSpaceDirectory {
                 if (workDir == null) {
                     try {
                         initTempWorkDir();
+//                        initWorkDirByEnvConfig();
                     } catch (IOException e) {
                         logger.error("init work dir failed", e);
                         throw new RuntimeException("初始化工作目录失败", e);
@@ -36,6 +37,9 @@ public class WorkSpaceDirectory {
 
     private static void initWorkDirByEnvConfig() throws FileNotFoundException {
         String baseDir = System.getenv().get(SHARE_IT_WORK_PATH);
+        if (baseDir == null){
+            baseDir = System.getProperty(SHARE_IT_WORK_PATH);
+        }
         if (baseDir == null){
         throw new RuntimeException("未找到环境变量：SHARE_IT_WORK_PATH。系统将使用该环境变量来指定工作目录");
         }
