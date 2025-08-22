@@ -21,6 +21,12 @@ public class NetWorkUtils {
                 continue;
             }
 
+            String name = networkInterface.getName();
+            // 跳过虚拟接口
+            if (name.startsWith("utun") || name.startsWith("awdl") || name.startsWith("llw")) {
+                continue;
+            }
+
             Enumeration<InetAddress> addresses = networkInterface.getInetAddresses();
             while (addresses.hasMoreElements()) {
                 InetAddress address = addresses.nextElement();
