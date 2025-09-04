@@ -23,7 +23,11 @@ public class NetWorkUtils {
 
             String name = networkInterface.getName();
             // 跳过虚拟接口
-            if (name.startsWith("utun") || name.startsWith("awdl") || name.startsWith("llw")) {
+            if (name.startsWith("utun")
+                    || name.startsWith("awdl")
+                    || name.startsWith("llw")
+                    || name.startsWith("bridge")
+            ) {
                 continue;
             }
 

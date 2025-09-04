@@ -1,7 +1,12 @@
 package com.valley.ShareIt.controller;
 
+import com.valley.ShareIt.enums.MsgTypeEnum;
 import com.valley.ShareIt.support.WorkSpaceDirectory;
 import com.valley.ShareIt.utils.FileUtils;
+import com.valley.ShareIt.utils.SseClientsManager;
+import com.valley.ShareIt.utils.TextContainer;
+import com.valley.ShareIt.vo.DeleteFileRequest;
+import com.valley.ShareIt.vo.SubmitTextRequest;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -13,6 +18,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.File;
 import java.io.IOException;
@@ -67,7 +73,6 @@ public class MainController {
                             fileInfo.put("creationTime", FileUtils.formatFileTime(attributes.creationTime()));
                             fileInfo.put("lastModifiedTime", FileUtils.formatFileTime(attributes.lastModifiedTime()));
                             fileInfo.put("fileUrl", "/file/download/" + URLEncoder.encode(path.getFileName().toString(), StandardCharsets.UTF_8));
-
                             // 添加到列表
                             fileList.add(fileInfo);
                         } catch (IOException e) {
@@ -127,6 +132,7 @@ public class MainController {
             // 保存文件到指定目录
             String filePath = Paths.get(WorkSpaceDirectory.getWorkDir(), file.getOriginalFilename()).toString();
             Files.write(Paths.get(filePath), file.getBytes());
+            SseClientsManager.sendMsgToAllClients(MsgTypeEnum.FILE_CHANGED.name(), "",null);
             return ResponseEntity.ok("文件上传成功！");
         } catch (IOException e) {
             logger.error("文件上传失败", e);
@@ -134,6 +140,52 @@ public class MainController {
         }
     }
 
+    @PostMapping("/delete")
+    public ResponseEntity<String> deleteFile(@RequestBody DeleteFileRequest request) {
+        try {
+            String fileName = request.getFileName();
+            Path filePath = Paths.get(WorkSpaceDirectory.getWorkDir(), fileName);
+            if (Files.exists(filePath)) {
+                Files.delete(filePath);
+                SseClientsManager.sendMsgToAllClients(MsgTypeEnum.FILE_CHANGED.name(), "",  null);
+                return ResponseEntity.ok("文件删除成功！");
+            } else {
+                return ResponseEntity.badRequest().body("文件不存在！");
+            }
+        }catch (IOException e){
+            return ResponseEntity.status(500).body("文件删除失败：" + e.getMessage());
+        }
+    }
+
+
+    @PostMapping("text")
+    public ResponseEntity<String> submitText(@RequestBody SubmitTextRequest request) {
+        TextContainer.setText(request.getText());
+        SseClientsManager.sendMsgToAllClients(MsgTypeEnum.TEXT_CHANGED.name(), request.getText(), request.getClientId());
+        return ResponseEntity.ok("提交成功！");
+    }
+
+    @GetMapping("text")
+    public ResponseEntity<String> getText() {
+        return ResponseEntity.ok(TextContainer.getText());
+    }
+
+    /**
+     * 建立 SSE 连接
+     */
+    @GetMapping(value = "/sse/connect", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter connect(@RequestParam String clientId) {
+        // 超时时间：30分钟
+        SseEmitter emitter = new SseEmitter(30 * 60 * 1000L);
+        SseClientsManager.addClient(clientId,emitter);
+
+        // 移除失效连接
+        emitter.onCompletion(() -> SseClientsManager.removeClient(clientId));
+        emitter.onTimeout(() -> SseClientsManager.removeClient(clientId));
+        emitter.onError((e) -> SseClientsManager.removeClient(clientId));
+
+        return emitter;
+    }
     private boolean haveEnoughSpace(long size) {
         return (FileUtils.getFreeSpace(WorkSpaceDirectory.getWorkDir()) - size) <= diskFreeSpaceConfig;
     }

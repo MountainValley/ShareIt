@@ -11,53 +11,91 @@
         body {
             padding-top: 20px;
         }
-        .container .mt-4 {
-            max-width: 1000px;
-            margin: auto;
+        .text-clipboard {
+            flex: 1;
+            background: #a3ddb4;
+            border: 1px solid #a3ddb4;   /* 可选，加个边框看得更清楚 */
+            border-radius: 10px;      /* 圆角半径 */
+        }
+        .file-clipboard{
+            background: #b0d9d4;
+            border: 1px solid #b0d9d4;   /* 可选，加个边框看得更清楚 */
+            border-radius: 10px;      /* 圆角半径 */
+        }
+        .text-clipboard > div {
+            width: 100%;
+        }
+        .text-clipboard > div > textarea {
+            width: 100%;
+            min-height: 400px;
+        }
+        .text-center {
+            text-align: center;
+            color: white;
+            margin-top: 10px;
+        }
+        .qrcode-row {
+            display: flex;
+            flex-direction: column;   /* 纵向排列 */
+            align-items: center;      /* 每个子元素在水平方向居中 */
         }
     </style>
 </head>
 <body>
 <div class="container">
-    <h1 class="text-center">--文件中转站--</h1>
-    <div class="mt-4 upload-container">
-        <!-- 文件上传 -->
-        <form id="upload-form" enctype="multipart/form-data">
-            <div class="input-group mb-3">
-                <input type="file" class="form-control" id="fileInput" name="file" required>
-                <button class="btn btn-success" type="submit">上传</button>
+    <div class="row">
+        <div class="col-md-4 text-clipboard">
+            <h2 class="text-center">文本粘贴板</h2>
+            <div class="mt-4">
+                <textarea id="text-content"></textarea>
             </div>
-        </form>
+        </div>
+        <div class="col-md-8 file-clipboard">
+            <h2 class="text-center">文件中转站</h2>
+            <div class="mt-4 upload-container">
+                <!-- 文件上传 -->
+                <form id="upload-form" enctype="multipart/form-data">
+                    <div class="input-group mb-3">
+                        <input type="file" class="form-control" id="fileInput" name="file" required>
+                        <button class="btn btn-success" type="submit">上传</button>
+                    </div>
+                </form>
+            </div>
+            <!-- 上传进度条 -->
+            <div class="progress mt-4 " style="height: 25px; display: none;" id="uploadProgressBox">
+                <div id="uploadProgressBar" class="progress-bar progress-bar-striped progress-bar-animated"
+                     role="progressbar" style="width: 0%">
+                    <span id="uploadProgressText"></span>
+                </div>
+            </div>
+
+            <div class="mt-4">
+                <table class="table table-striped table-bordered text-center">
+                    <thead class="table-dark">
+                    <tr>
+                        <th>#</th>
+                        <th>文件名</th>
+                        <th>文件大小</th>
+                        <th>最后修改时间</th>
+                        <th>操作</th>
+                    </tr>
+                    </thead>
+                    <tbody id="file-table-body">
+                    <!-- 文件信息通过 JavaScript 动态加载 -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
-    <!-- 上传进度条 -->
-    <div class="progress mt-4" style="height: 25px; display: none;" id="uploadProgressBox">
-        <div id="uploadProgressBar" class="progress-bar progress-bar-striped progress-bar-animated" 
-            role="progressbar" style="width: 0%">
-            <span id="uploadProgressText"></span>
+    <div class="row">
+        <div class="col-md-12 qrcode-row">
+            <div id="qrcode" style="width:150px; height:150px; margin-top:50px;" class="mt-4 text-center"></div>
+            <div class="text-center mt-4" style="color: #3182ce;">
+                <p>扫码分享此页面</p>
+            </div>
         </div>
     </div>
 
-    <div class="mt-4">
-        <table class="table table-striped table-bordered text-center">
-            <thead class="table-dark">
-            <tr>
-                <th>#</th>
-                <th>文件名</th>
-                <th>文件大小</th>
-                <th>最后修改时间</th>
-                <th>操作</th>
-            </tr>
-            </thead>
-            <tbody id="file-table-body">
-            <!-- 文件信息通过 JavaScript 动态加载 -->
-            </tbody>
-        </table>
-    </div>
-
-    <div id="qrcode" style="width:150px; height:150px; margin-top:50px;" class="mt-4"></div>
-    <div class="text-center mt-4" style="color: #3182ce;">
-        <p>扫码分享此页面</p>
-    </div>
 </div>
 
 <!-- 引入 Bootstrap 和 jQuery -->
@@ -70,7 +108,42 @@
 <script>
     const apiUrl = '/file/list';
     const uploadUrl = '/file/upload';
+    function uuidv4() {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+            const r = crypto.getRandomValues(new Uint8Array(1))[0] & 15;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
+    const clientId = uuidv4();
+    console.log("clientId:", clientId);
 
+    // 建立SSE连接
+    const eventSource = new EventSource("/file/sse/connect?clientId=" + clientId);
+    // 默认消息监听
+    eventSource.onmessage = function (event) {
+        console.log("收到消息:", event.data);
+    };
+    // 自定义事件监听
+    eventSource.addEventListener("message", function(event) {
+        // 处理消息json
+        const message = JSON.parse(event.data);
+        if(message.type === "FILE_CHANGED") {
+            // 更新文件列表
+            fetchFiles();
+        }else if(message.type === "TEXT_CHANGED") {
+            // 更新文本
+            $("#text-content").val(message.content);
+        }
+
+    });
+
+    // 连接出错时
+    eventSource.onerror = function(event) {
+        console.error("SSE 出错:", event);
+    };
+
+    // 更新文件中转站数据
     function fetchFiles() {
         $.get(apiUrl, function (data) {
             const tableBody = $('#file-table-body');
@@ -83,7 +156,8 @@
                             <td>${file.fileName}</td>
                             <td>${file.fileSize}</td>
                             <td>${file.lastModifiedTime}</td>
-                            <td><a href="${file.fileUrl}" class="btn btn-primary btn-sm" download>下载</a></td>
+                            <td><a href="${file.fileUrl}" class="btn btn-primary btn-sm" download>下载</a>&nbsp;&nbsp;
+                            <a href="javascript:void(0);" onclick="deleteFile('${file.fileName}')" class="btn btn-danger btn-sm">删除</a></td>
                         </tr>
                     `;
                     tableBody.append(row);
@@ -134,7 +208,7 @@
             if (xhr.readyState === 4) {
                 progressBox.hide();
                 if (xhr.status === 200) {
-                    fetchFiles();
+                    // fetchFiles();
                 } else {
                     alert('上传失败，请稍后再试。');
                 }
@@ -146,21 +220,73 @@
         xhr.open('POST', uploadUrl);
         xhr.send(formData);
 
-        // $.ajax({
-        //     url: uploadUrl,
-        //     type: 'POST',
-        //     data: formData,
-        //     processData: false,
-        //     contentType: false,
-        //     success: function () {
-        //         alert('文件上传成功！');
-        //         fetchFiles(); // 上传成功后刷新文件列表
-        //     },
-        //     error: function () {
-        //         alert('文件上传失败，请稍后再试！');
-        //     }
-        // });
     });
+
+    function deleteFile(fileName) {
+        if (confirm('确定要删除此文件吗？')) {
+            $.ajax({
+                url: '/file/delete',
+                type: 'POST',
+                data: JSON.stringify({
+                    fileName: fileName
+                }),
+                contentType: "application/json",
+                success: function () {
+                    // fetchFiles();
+                },
+                error: function () {
+                    alert('删除文件失败，请稍后再试！');
+                }
+            });
+        }
+    }
+
+    const textarea = document.getElementById("text-content");
+    let isComposing = false;
+
+    // 输入法开始拼写
+    textarea.addEventListener("compositionstart", () => {
+      isComposing = true;
+    });
+
+    // 输入法结束拼写
+    textarea.addEventListener("compositionend", (event) => {
+      isComposing = false;
+      submitText(event.target.value);
+    });
+
+    // 普通输入
+    textarea.addEventListener("input", (event) => {
+      if (!isComposing) {
+        submitText(event.target.value);
+      }
+    });
+
+    // 提交文本粘贴板内容
+    function submitText(text){
+        $.ajax({
+            url: '/file/text',
+            type: 'POST',
+            data: JSON.stringify({
+                text: text,
+                clientId: clientId
+            }),
+            contentType: "application/json",
+            error: function () {
+                alert('保存文本粘贴板内容失败，请稍后再试！');
+            }
+        });
+    }
+
+    function fetchText() {
+        $.get("/file/text", function (data) {
+            if (data) {
+                $("#text-content").val(data);
+            }
+        }).fail(function () {
+            alert('文本粘贴板加载失败，请稍后再试！');
+        });
+    }
 
     // 页面加载完成后获取文件列表
     $(document).ready(fetchFiles);
@@ -183,9 +309,16 @@
         const url = window.location.href; // 获取当前页面的URL
         qrcode.makeCode(url); // 生成二维码
     }
+    function fetchData() {
+        generateQRCode();
+        fetchText();
+    }
 
     // 页面加载完成后生成二维码
-    $(document).ready(generateQRCode);
+    $(document).ready(fetchData);
+
+
+
 
 </script>
 </body>
