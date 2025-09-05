@@ -1,7 +1,9 @@
 package com.valley.ShareIt.utils;
 
+import com.alibaba.fastjson2.JSONObject;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -24,7 +26,10 @@ public class SseClientsManager {
     }
 
     public static void sendMsgToAllClients(String msgType,String msgContent, String excludeClientId) {
-        String msg = "{\"type\":\"" + msgType + "\",\"content\":\"" + msgContent + "\"}";
+        Map<String,String> map = new HashMap<>();
+        map.put("type",msgType);
+        map.put("content",msgContent);
+        String msg = JSONObject.toJSONString(map);
         for (Map.Entry<String, SseEmitter> entry : clients.entrySet()) {
             try {
                 if (!entry.getKey().equals(excludeClientId)) {
