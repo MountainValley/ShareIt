@@ -8,8 +8,10 @@ import org.springframework.context.ApplicationEvent;
 import org.springframework.context.ApplicationListener;
 import org.springframework.stereotype.Component;
 
+import java.awt.*;
 import java.io.IOException;
 import java.net.SocketException;
+import java.net.URI;
 
 /**
  * @author dale
@@ -36,9 +38,9 @@ public class ContextListener implements ApplicationListener {
                 if (os.startsWith("mac")) {
                     Runtime.getRuntime().exec("open " + url);
                 }else if (os.startsWith("windows")){
-                    Runtime.getRuntime().exec("start " + url);
+                    Runtime.getRuntime().exec(new String[]{"cmd", "/c", "start", "", url});
                 }
-            } catch (IOException e) {
+            } catch (Exception e) {
                 logger.error("open link "+url+" failed",e);
             }
         }

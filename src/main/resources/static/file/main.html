@@ -121,12 +121,10 @@
 
     // 建立SSE连接
     const eventSource = new EventSource("/file/sse/connect?clientId=" + clientId);
-    // 默认消息监听
-    eventSource.onmessage = function (event) {
-        console.log("收到消息:", event.data);
-    };
+
     // 自定义事件监听
     eventSource.addEventListener("message", function(event) {
+        console.log("收到消息:", event.data);
         // 处理消息json
         const message = JSON.parse(event.data);
         if(message.type === "FILE_CHANGED") {
