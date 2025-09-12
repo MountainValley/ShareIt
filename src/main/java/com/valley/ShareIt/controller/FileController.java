@@ -114,18 +114,17 @@ public class FileController {
 
 
     @PostMapping("upload")
-    public ResponseEntity<String> uploadFile(@RequestParam("file") MultipartFile file) {
-        if (file.isEmpty()) {
-            return ResponseEntity.badRequest().body("文件不能为空！");
-        } else if (haveEnoughSpace(file.getSize())) {
-            return ResponseEntity.badRequest().body("文件上传失败，剩余磁盘空间不足：" + FileUtils.formatFileSize(diskFreeSpaceConfig));
-        }
-
+    public ResponseEntity<String> uploadFile(@RequestParam("files") MultipartFile[] files) {
         try {
-            // 保存文件到指定目录
-            String filePath = Paths.get(WorkSpaceDirectory.getWorkDir(), file.getOriginalFilename()).toString();
-            Files.write(Paths.get(filePath), file.getBytes());
-            SseClientsManager.sendMsgToAllClients(MsgTypeEnum.FILE_CHANGED.name(), "",null);
+            for (MultipartFile file : files){
+                if (haveEnoughSpace(file.getSize())) {
+                    return ResponseEntity.badRequest().body("文件上传失败，剩余磁盘空间不足：" + FileUtils.formatFileSize(diskFreeSpaceConfig));
+                }
+                // 保存文件到指定目录
+                String filePath = Paths.get(WorkSpaceDirectory.getWorkDir(), file.getOriginalFilename()).toString();
+                Files.write(Paths.get(filePath), file.getBytes());
+                SseClientsManager.sendMsgToAllClients(MsgTypeEnum.FILE_CHANGED.name(), "",null);
+            }
             return ResponseEntity.ok("文件上传成功！");
         } catch (IOException e) {
             log.error("文件上传失败", e);
