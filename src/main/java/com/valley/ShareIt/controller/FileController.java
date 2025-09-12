@@ -117,6 +117,7 @@ public class FileController {
     public ResponseEntity<String> uploadFile(@RequestParam("files") MultipartFile[] files) {
         try {
             for (MultipartFile file : files){
+                log.info("文件上传开始：" + file.getOriginalFilename());
                 if (haveEnoughSpace(file.getSize())) {
                     return ResponseEntity.badRequest().body("文件上传失败，剩余磁盘空间不足：" + FileUtils.formatFileSize(diskFreeSpaceConfig));
                 }

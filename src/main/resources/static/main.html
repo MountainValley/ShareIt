@@ -39,6 +39,10 @@
             flex-direction: column;   /* 纵向排列 */
             align-items: center;      /* 每个子元素在水平方向居中 */
         }
+        body.dragover {
+            border: 4px dashed #3182ce;  /* 可选，提示用户正在拖拽 */
+            background-color: #e0f0ff;   /* 拖拽时的背景色 */
+        }
     </style>
 </head>
 <body>
@@ -181,9 +185,9 @@
         const progressText = $('#uploadProgressText');
 
         // 显示进度条
-        progressBox.show();
         progressBar.css('width', '0%');
         progressText.text('0%');
+        progressBox.show();
 
         let startTime = Date.now(); // 记录开始时间
         let lastLoaded = 0;
@@ -309,6 +313,81 @@
     function fetchData() {
         generateQRCode();
         fetchText();
+    }
+
+    // 全局拖拽事件
+    document.body.addEventListener('dragover', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        document.body.classList.add('dragover');
+    });
+
+    document.body.addEventListener('dragleave', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        document.body.classList.remove('dragover');
+    });
+
+    document.body.addEventListener('drop', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        document.body.classList.remove('dragover');
+
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            uploadFiles(files); // 调用上传方法
+        }
+    });
+
+    function uploadFiles(files) {
+        const formData = new FormData();
+        for (let i = 0; i < files.length; i++) {
+            formData.append("files", files[i]);  // 注意这里要和后端 @RequestParam("files") 名字一致
+        }
+
+        const xhr = new XMLHttpRequest();
+
+        // 获取进度条元素
+        const progressBox = $('#uploadProgressBox');
+        const progressBar = $('#uploadProgressBar');
+        const progressText = $('#uploadProgressText');
+
+        progressBar.css('width', '0%');
+        progressText.text('0%');
+        progressBox.show();
+
+        $(".upload-container").hide();
+
+        let startTime = Date.now();
+
+        xhr.upload.addEventListener('progress', function (e) {
+            if (e.lengthComputable) {
+                const percent = Math.round((e.loaded / e.total) * 100);
+                progressBar.css('width', percent + '%');
+
+                // 计算上传速度
+                const now = Date.now();
+                const duration = (now - startTime) / 1000; // 秒
+                const speed = e.loaded / duration;         // bytes/s
+                const speedStr = formatSpeed(speed);
+                progressText.text(`${percent}% | ${speedStr}`);
+            }
+        });
+
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState === 4) {
+                progressBox.hide();
+                if (xhr.status === 200) {
+                    fetchFiles(); // 上传完成刷新文件列表
+                } else {
+                    alert('上传失败，请稍后再试。');
+                }
+                $(".upload-container").show();
+            }
+        };
+
+        xhr.open('POST', uploadUrl);
+        xhr.send(formData);
     }
 
     // 页面加载完成后生成二维码
