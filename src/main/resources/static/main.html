@@ -390,6 +390,20 @@
         xhr.send(formData);
     }
 
+    // ------------------- 粘贴上传 -------------------
+    $(document).on('paste', function(e) {
+        const clipboardItems = e.originalEvent.clipboardData.items;
+        const files = [];
+        for (let i = 0; i < clipboardItems.length; i++) {
+            const item = clipboardItems[i];
+            if (item.kind === 'file') {
+                const file = item.getAsFile();
+                if (file) files.push(file);
+            }
+        }
+        if (files.length > 0) uploadFiles(files);
+    });
+
     // 页面加载完成后生成二维码
     $(document).ready(fetchData);
 
