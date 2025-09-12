@@ -21,7 +21,7 @@ import java.net.URI;
 public class ContextListener implements ApplicationListener {
     private static final Log logger = LogFactory.getLog(ContextListener.class);
     private static final String PROTOCOL = "http://";
-    private static final String HOME_PAGE = "/file/home";
+    private static final String HOME_PAGE = "/";
 
     @Override
     public void onApplicationEvent(ApplicationEvent event) {

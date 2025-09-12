@@ -120,7 +120,7 @@
     console.log("clientId:", clientId);
 
     // 建立SSE连接
-    const eventSource = new EventSource("/file/sse/connect?clientId=" + clientId);
+    const eventSource = new EventSource("/sse/connect?clientId=" + clientId);
 
     // 自定义事件监听
     eventSource.addEventListener("message", function(event) {
@@ -222,8 +222,7 @@
     });
 
     function deleteFile(fileName) {
-        if (confirm('确定要删除此文件吗？')) {
-            $.ajax({
+        $.ajax({
                 url: '/file/delete',
                 type: 'POST',
                 data: JSON.stringify({
@@ -237,7 +236,6 @@
                     alert('删除文件失败，请稍后再试！');
                 }
             });
-        }
     }
 
     const textarea = document.getElementById("text-content");
@@ -264,7 +262,7 @@
     // 提交文本粘贴板内容
     function submitText(text){
         $.ajax({
-            url: '/file/text',
+            url: '/notepad/text',
             type: 'POST',
             data: JSON.stringify({
                 text: text,
@@ -278,7 +276,7 @@
     }
 
     function fetchText() {
-        $.get("/file/text", function (data) {
+        $.get("/notepad/text", function (data) {
             if (data) {
                 $("#text-content").val(data);
             }
@@ -315,8 +313,6 @@
 
     // 页面加载完成后生成二维码
     $(document).ready(fetchData);
-
-
 
 
 </script>
