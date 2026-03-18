@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>3.4.0</version>
+		<relativePath/> <!-- lookup parent from repository -->
+	</parent>
+	<groupId>com.valley</groupId>
+	<artifactId>ShareIt</artifactId>
+	<version>1.0.0</version>
+	<name>ShareIt</name>
+	<description>File Sharing Tool for Local Area Network</description>
+	<url/>
+	<licenses>
+		<license/>
+	</licenses>
+	<developers>
+		<developer/>
+	</developers>
+	<scm>
+		<connection/>
+		<developerConnection/>
+		<tag/>
+		<url/>
+	</scm>
+	<properties>
+		<java.version>21</java.version>
+	</properties>
+	<dependencies>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-web</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+			<exclusions>
+				<exclusion>
+					<groupId>org.mockito</groupId>
+					<artifactId>mockito-core</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.mockito</groupId>
+					<artifactId>mockito-junit-jupiter</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>org.projectlombok</groupId>
+			<artifactId>lombok</artifactId>
+			<version>1.18.38</version>
+		</dependency>
+        <dependency>
+            <groupId>com.alibaba.fastjson2</groupId>
+            <artifactId>fastjson2</artifactId>
+            <version>2.0.58</version>
+        </dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<argLine>-XX:+EnableDynamicAgentLoading</argLine>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+				<executions>
+					<execution>
+						<goals>
+							<goal>repackage</goal>
+						</goals>
+					</execution>
+				</executions>
+			</plugin>
+			<!-- Maven JPackage 插件 -->
+			<plugin>
+				<groupId>org.panteleyev</groupId>
+				<artifactId>jpackage-maven-plugin</artifactId>
+				<version>1.6.6</version> <!-- 建议用最新 -->
+
+				<configuration>
+					<name>ShareIt</name>
+					<mainJar>${project.build.finalName}.jar</mainJar>
+<!--					<mainClass>com.valley.ShareIt.ShareItApplication</mainClass> &lt;!&ndash; 主类全限定名 &ndash;&gt;-->
+					<mainClass>org.springframework.boot.loader.launch.JarLauncher</mainClass>
+					<runtimeImage>${java.home}</runtimeImage> <!-- 用当前JDK作为运行时 -->
+					<!-- 告诉 jpackage 从哪里找 jar -->
+					<input>${project.build.directory}</input>
+					<!-- 输出目录 -->
+					<destination>${project.build.directory}/dist</destination>
+
+					<javaOptions>
+						<option>-Dfile.encoding=UTF-8</option>
+					</javaOptions>
+				</configuration>
+
+				<executions>
+					<execution>
+						<id>mac</id>
+						<configuration>
+							<icon>../icons/app.icns</icon>
+						</configuration>
+					</execution>
+					<execution>
+						<id>win</id>
+						<configuration>
+							<icon>../icons/app.ico</icon>
+							<winMenu>true</winMenu>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+
+
+		</plugins>
+	</build>
+
+</project>
