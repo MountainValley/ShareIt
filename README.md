@@ -1,4 +1,5 @@
 # ShareIt
+**局域网文件共享工具 Local Area Network File Sharing Tool**
 
 项目已经拆分为前后端两个子模块：
 
@@ -31,4 +32,3 @@
 ```
 
 构建脚本会先打包前端，再把前端静态资源复制到 `backend/src/main/resources/static`，最后构建 Spring Boot 包。
-局域网文件共享工具 Local Area Network File Sharing Tool
