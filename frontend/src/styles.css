@@ -242,12 +242,12 @@ a {
   cursor: pointer;
 }
 
-.upload-list {
+.transfer-list {
   display: grid;
   gap: 8px;
 }
 
-.upload-float {
+.transfer-float {
   position: fixed;
   right: 24px;
   bottom: 24px;
@@ -261,11 +261,11 @@ a {
   overflow: hidden;
 }
 
-.upload-float.collapsed {
+.transfer-float.collapsed {
   width: auto;
 }
 
-.upload-float-toggle {
+.transfer-float-toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -278,7 +278,14 @@ a {
   font-weight: 600;
 }
 
-.upload-float-toggle strong {
+.transfer-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.transfer-counts em,
+.transfer-float-toggle strong {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -289,17 +296,27 @@ a {
   background: rgba(27, 111, 82, 0.12);
   color: #1b6f52;
   font-size: 0.88rem;
+  font-style: normal;
 }
 
-.upload-float-body {
+.transfer-counts em {
+  min-width: 34px;
+}
+
+.transfer-counts em:first-child {
+  background: rgba(20, 96, 165, 0.12);
+  color: #1460a5;
+}
+
+.transfer-float-body {
   max-height: min(420px, 55vh);
   padding: 0 10px 10px;
   overflow: auto;
 }
 
-.upload-item {
+.transfer-item {
   display: grid;
-  gap: 4px;
+  gap: 8px;
   padding: 8px 10px;
   border: 1px solid rgba(23, 49, 39, 0.08);
   border-radius: 14px;
@@ -310,12 +327,52 @@ a {
     background-color 180ms ease;
 }
 
-.upload-item.is-success {
+.transfer-item.download.is-success {
+  background: rgba(230, 241, 252, 0.94);
+}
+
+.transfer-item.upload.is-success {
   background: rgba(232, 244, 236, 0.9);
 }
 
-.upload-item.is-error {
+.transfer-item.is-error {
   background: rgba(251, 236, 232, 0.94);
+}
+
+.transfer-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.transfer-item-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(23, 49, 39, 0.08);
+  color: #476255;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.transfer-item.download .transfer-tag {
+  background: rgba(20, 96, 165, 0.12);
+  color: #1460a5;
+}
+
+.transfer-item.upload .transfer-tag {
+  background: rgba(27, 111, 82, 0.12);
+  color: #1b6f52;
 }
 
 .progress-shell {
@@ -330,6 +387,18 @@ a {
   position: absolute;
   inset: 0 auto 0 0;
   background: linear-gradient(90deg, #1b6f52, #47a77b);
+}
+
+.progress-shell.download {
+  background: rgba(20, 96, 165, 0.12);
+}
+
+.progress-shell.download .progress-bar {
+  background: linear-gradient(90deg, #1460a5, #53a2eb);
+}
+
+.progress-shell.upload {
+  background: rgba(18, 71, 52, 0.1);
 }
 
 .progress-shell span {
@@ -347,22 +416,51 @@ a {
   white-space: nowrap;
 }
 
-.upload-status {
+.transfer-status {
   margin: 0;
   color: #4a6559;
   font-size: 0.8rem;
 }
 
-.upload-float-body-enter-active,
-.upload-float-body-leave-active {
+.transfer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.tiny-action {
+  border: none;
+  border-radius: 999px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.tiny-action.primary {
+  background: #1460a5;
+  color: #eff7ff;
+}
+
+.tiny-action.subtle {
+  background: rgba(23, 49, 39, 0.08);
+  color: #355246;
+}
+
+.tiny-action.danger {
+  background: rgba(126, 38, 24, 0.1);
+  color: #8a2f1c;
+}
+
+.transfer-float-body-enter-active,
+.transfer-float-body-leave-active {
   transition:
     opacity 180ms ease,
     transform 180ms ease;
   transform-origin: bottom right;
 }
 
-.upload-float-body-enter-from,
-.upload-float-body-leave-to {
+.transfer-float-body-enter-from,
+.transfer-float-body-leave-to {
   opacity: 0;
   transform: translateY(8px) scale(0.96);
 }
@@ -435,7 +533,7 @@ a {
     justify-self: start;
   }
 
-  .upload-float {
+  .transfer-float {
     right: 16px;
     bottom: 16px;
     width: min(360px, calc(100vw - 24px));

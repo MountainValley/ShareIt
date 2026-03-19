@@ -6,7 +6,6 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * @author dale
@@ -25,6 +24,10 @@ public class SseClientsManager {
         clients.remove(clientId);
     }
 
+    public static void removeClient(String clientId, SseEmitter client) {
+        clients.remove(clientId, client);
+    }
+
     public static void sendMsgToAllClients(String msgType,String msgContent, String excludeClientId) {
         Map<String,String> map = new HashMap<>();
         map.put("type",msgType);
@@ -37,7 +40,7 @@ public class SseClientsManager {
                 }
             } catch (Exception e) {
                 // 移除掉异常的客户端
-                removeClient(entry.getKey());
+                removeClient(entry.getKey(), entry.getValue());
             }
         }
     }

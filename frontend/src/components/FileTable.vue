@@ -6,7 +6,7 @@ defineProps({
   }
 });
 
-defineEmits(["delete"]);
+defineEmits(["delete", "download"]);
 </script>
 
 <template>
@@ -39,7 +39,9 @@ defineEmits(["delete"]);
             <td>{{ file.fileSize }}</td>
             <td>{{ file.lastModifiedTime }}</td>
             <td class="actions">
-              <a :href="file.fileUrl" class="action-link primary">下载</a>
+              <button type="button" class="action-link primary" @click="$emit('download', file)">
+                下载
+              </button>
               <button type="button" class="action-link danger" @click="$emit('delete', file.fileName)">
                 删除
               </button>

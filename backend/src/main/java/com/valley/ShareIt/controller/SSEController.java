@@ -8,8 +8,10 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 服务端时间推送服务
@@ -19,7 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 @RestController
 @RequestMapping("/api/sse")
 public class SSEController {
-    private static final ExecutorService executorService = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(), new ThreadFactory() {
+    private static final ScheduledExecutorService executorService = Executors.newScheduledThreadPool(1, new ThreadFactory() {
         private final AtomicInteger counter = new AtomicInteger(1);
         @Override
         public Thread newThread(Runnable r) {
@@ -32,24 +34,31 @@ public class SSEController {
      */
     @GetMapping(value = "connect", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter connect(@RequestParam String clientId) {
-        // 超时时间：30分钟
         SseEmitter emitter = new SseEmitter(0L);
-        executorService.execute(() -> {
-            try {
-                while (true) {
-                    emitter.send(SseEmitter.event().comment("keepalive"));
-                    Thread.sleep(15000); // 每 15 秒发一个心跳
-                }
-            } catch (Exception e) {
-                emitter.completeWithError(e);
+        AtomicBoolean active = new AtomicBoolean(true);
+        ScheduledFuture<?> heartbeatFuture = executorService.scheduleAtFixedRate(() -> {
+            if (!active.get()) {
+                return;
             }
-        });
-        SseClientsManager.addClient(clientId,emitter);
+            try {
+                emitter.send(SseEmitter.event().comment("keepalive"));
+            } catch (IOException | IllegalStateException e) {
+                active.set(false);
+                SseClientsManager.removeClient(clientId, emitter);
+            }
+        }, 0, 15, TimeUnit.SECONDS);
 
-        // 移除失效连接
-        emitter.onCompletion(() -> SseClientsManager.removeClient(clientId));
-        emitter.onTimeout(() -> SseClientsManager.removeClient(clientId));
-        emitter.onError((e) -> SseClientsManager.removeClient(clientId));
+        Runnable cleanup = () -> {
+            active.set(false);
+            heartbeatFuture.cancel(true);
+            SseClientsManager.removeClient(clientId, emitter);
+        };
+
+        SseClientsManager.addClient(clientId, emitter);
+
+        emitter.onCompletion(cleanup);
+        emitter.onTimeout(cleanup);
+        emitter.onError((e) -> cleanup.run());
 
         return emitter;
     }

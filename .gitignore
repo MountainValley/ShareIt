@@ -30,6 +30,8 @@ build/
 !**/src/test/**/build/
 frontend/node_modules/
 frontend/dist/
+backend/src/main/resources/static/
+.DS_Store
 
 ### VS Code ###
 .vscode/

@@ -12,8 +12,10 @@ const isComposing = ref(false);
 const qrCodeDataUrl = ref("");
 const qrExpanded = ref(false);
 const uploadItems = ref([]);
-const uploadPanelExpanded = ref(true);
-const uploadCleanupTimers = new Map();
+const downloadItems = ref([]);
+const transferPanelExpanded = ref(true);
+const taskCleanupTimers = new Map();
+const downloadRuntimes = new Map();
 
 function createClientId() {
   if (typeof crypto !== "undefined") {
@@ -38,8 +40,18 @@ function createClientId() {
   return `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function createTaskId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 const clientId = createClientId();
 let eventSource;
+
+const transferItems = computed(() =>
+  [...downloadItems.value, ...uploadItems.value].sort((left, right) => right.createdAt - left.createdAt)
+);
+const uploadCount = computed(() => uploadItems.value.length);
+const downloadCount = computed(() => downloadItems.value.length);
 
 function formatSpeed(bytesPerSec) {
   if (bytesPerSec < 1024) return `${bytesPerSec.toFixed(1)} B/s`;
@@ -48,30 +60,118 @@ function formatSpeed(bytesPerSec) {
 }
 
 function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return "未知大小";
+  }
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
-function removeUploadItem(id) {
-  const timer = uploadCleanupTimers.get(id);
+function clearTaskCleanup(id) {
+  const timer = taskCleanupTimers.get(id);
   if (timer) {
     clearTimeout(timer);
-    uploadCleanupTimers.delete(id);
+    taskCleanupTimers.delete(id);
   }
+}
+
+function scheduleTaskCleanup(id, removeTask) {
+  clearTaskCleanup(id);
+  const timer = window.setTimeout(() => {
+    removeTask(id);
+  }, 5000);
+  taskCleanupTimers.set(id, timer);
+}
+
+function refreshUploadItems() {
+  uploadItems.value = [...uploadItems.value];
+}
+
+function refreshDownloadItems() {
+  downloadItems.value = [...downloadItems.value];
+}
+
+function removeUploadItem(id) {
+  clearTaskCleanup(id);
   uploadItems.value = uploadItems.value.filter((item) => item.id !== id);
 }
 
-function scheduleUploadCleanup(id) {
-  const existingTimer = uploadCleanupTimers.get(id);
-  if (existingTimer) {
-    clearTimeout(existingTimer);
+function cleanupDownloadRuntime(id) {
+  const runtime = downloadRuntimes.get(id);
+  if (!runtime) {
+    return;
   }
-  const timer = window.setTimeout(() => {
-    removeUploadItem(id);
-  }, 5000);
-  uploadCleanupTimers.set(id, timer);
+  runtime.controller?.abort();
+  if (runtime.objectUrl) {
+    URL.revokeObjectURL(runtime.objectUrl);
+  }
+  downloadRuntimes.delete(id);
+}
+
+function removeDownloadItem(id) {
+  clearTaskCleanup(id);
+  cleanupDownloadRuntime(id);
+  downloadItems.value = downloadItems.value.filter((item) => item.id !== id);
+}
+
+function requestRuntime(id) {
+  if (!downloadRuntimes.has(id)) {
+    downloadRuntimes.set(id, {
+      controller: null,
+      chunks: [],
+      objectUrl: "",
+      abortReason: ""
+    });
+  }
+  return downloadRuntimes.get(id);
+}
+
+function parseContentRange(contentRange) {
+  const match = /^bytes\s+(\d+)-(\d+)\/(\d+)$/.exec(contentRange || "");
+  if (!match) {
+    return null;
+  }
+  return {
+    start: Number(match[1]),
+    end: Number(match[2]),
+    total: Number(match[3])
+  };
+}
+
+function extractFileName(contentDisposition, fallbackName) {
+  const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(contentDisposition || "");
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return fallbackName;
+    }
+  }
+  const basicMatch = /filename="([^"]+)"/i.exec(contentDisposition || "");
+  return basicMatch?.[1] || fallbackName;
+}
+
+function saveBlob(blob, fileName, id) {
+  const runtime = requestRuntime(id);
+  if (runtime.objectUrl) {
+    URL.revokeObjectURL(runtime.objectUrl);
+  }
+  runtime.objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = runtime.objectUrl;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => {
+    const currentRuntime = downloadRuntimes.get(id);
+    if (currentRuntime?.objectUrl) {
+      URL.revokeObjectURL(currentRuntime.objectUrl);
+      currentRuntime.objectUrl = "";
+    }
+  }, 1000);
 }
 
 async function requestJson(url, options) {
@@ -119,7 +219,9 @@ async function deleteFile(fileName) {
 
 async function uploadSingleFile(file) {
   const uploadItem = {
-    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    id: createTaskId("upload"),
+    kind: "upload",
+    createdAt: Date.now(),
     fileName: file.name,
     fileSize: formatFileSize(file.size),
     percent: 0,
@@ -148,7 +250,7 @@ async function uploadSingleFile(file) {
         status: "uploading",
         message: "正在上传"
       });
-      uploadItems.value = [...uploadItems.value];
+      refreshUploadItems();
     });
 
     xhr.onload = () => {
@@ -159,8 +261,8 @@ async function uploadSingleFile(file) {
           status: "success",
           message: "上传完成"
         });
-        uploadItems.value = [...uploadItems.value];
-        scheduleUploadCleanup(uploadItem.id);
+        refreshUploadItems();
+        scheduleTaskCleanup(uploadItem.id, removeUploadItem);
         resolve();
         return;
       }
@@ -170,7 +272,7 @@ async function uploadSingleFile(file) {
         message,
         speed: "失败"
       });
-      uploadItems.value = [...uploadItems.value];
+      refreshUploadItems();
       reject(new Error(message));
     };
 
@@ -180,7 +282,7 @@ async function uploadSingleFile(file) {
         message: "Upload failed",
         speed: "失败"
       });
-      uploadItems.value = [...uploadItems.value];
+      refreshUploadItems();
       reject(new Error("Upload failed"));
     };
     xhr.send(formData);
@@ -197,6 +299,217 @@ async function uploadFiles(filesToUpload) {
   if (firstError?.reason) {
     throw firstError.reason;
   }
+}
+
+function updateDownloadProgress(item, loadedBytes, totalBytes, runtime) {
+  item.downloadedBytes = loadedBytes;
+  item.totalBytes = totalBytes;
+  item.fileSize = formatFileSize(totalBytes);
+  item.percent = totalBytes > 0 ? Math.min(100, Math.round((loadedBytes / totalBytes) * 100)) : 0;
+
+  const now = Date.now();
+  const elapsed = Math.max((now - runtime.lastSampleAt) / 1000, 0.1);
+  const deltaBytes = loadedBytes - runtime.lastSampleBytes;
+  item.speed = formatSpeed(Math.max(deltaBytes, 0) / elapsed);
+  item.message = totalBytes > 0
+    ? `${formatFileSize(loadedBytes)} / ${formatFileSize(totalBytes)}`
+    : `已下载 ${formatFileSize(loadedBytes)}`;
+
+  runtime.lastSampleAt = now;
+  runtime.lastSampleBytes = loadedBytes;
+  refreshDownloadItems();
+}
+
+async function runDownload(item) {
+  const runtime = requestRuntime(item.id);
+  const startOffset = item.downloadedBytes;
+  const headers = {};
+  if (startOffset > 0) {
+    headers.Range = `bytes=${startOffset}-`;
+    if (item.eTag) {
+      headers["If-Range"] = item.eTag;
+    } else if (item.lastModified) {
+      headers["If-Range"] = item.lastModified;
+    }
+  }
+
+  runtime.abortReason = "";
+  runtime.controller = new AbortController();
+  runtime.lastSampleAt = Date.now();
+  runtime.lastSampleBytes = item.downloadedBytes;
+
+  item.status = "downloading";
+  item.speed = "0 B/s";
+  item.message = startOffset > 0 ? "继续下载中" : "正在下载";
+  refreshDownloadItems();
+
+  try {
+    const response = await fetch(item.fileUrl, {
+      headers,
+      signal: runtime.controller.signal
+    });
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || "Download failed");
+    }
+
+    const contentDisposition = response.headers.get("content-disposition") || "";
+    item.fileName = extractFileName(contentDisposition, item.fileName);
+    item.eTag = response.headers.get("etag") || item.eTag;
+    item.lastModified = response.headers.get("last-modified") || item.lastModified;
+
+    let totalBytes = item.totalBytes;
+    if (response.status === 206) {
+      const contentRange = parseContentRange(response.headers.get("content-range") || "");
+      if (contentRange?.total) {
+        totalBytes = contentRange.total;
+      }
+    } else {
+      const fullLength = Number(response.headers.get("content-length") || 0);
+      if (fullLength > 0) {
+        totalBytes = fullLength;
+      }
+      if (startOffset > 0) {
+        runtime.chunks = [];
+        item.downloadedBytes = 0;
+        item.percent = 0;
+      }
+    }
+
+    if (!totalBytes) {
+      const fallbackLength = Number(response.headers.get("content-length") || 0);
+      totalBytes = response.status === 206 ? startOffset + fallbackLength : fallbackLength;
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error("当前浏览器不支持流式下载");
+    }
+
+    let loadedBytes = item.downloadedBytes;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      runtime.chunks.push(value);
+      loadedBytes += value.byteLength;
+      updateDownloadProgress(item, loadedBytes, totalBytes, runtime);
+    }
+
+    const blob = new Blob(runtime.chunks, {
+      type: response.headers.get("content-type") || "application/octet-stream"
+    });
+    saveBlob(blob, item.fileName, item.id);
+    runtime.chunks = [];
+    runtime.controller = null;
+
+    Object.assign(item, {
+      totalBytes,
+      downloadedBytes: totalBytes,
+      percent: 100,
+      speed: "完成",
+      status: "success",
+      message: "下载完成"
+    });
+    refreshDownloadItems();
+    scheduleTaskCleanup(item.id, removeDownloadItem);
+  } catch (error) {
+    runtime.controller = null;
+    if (error?.name === "AbortError") {
+      if (runtime.abortReason === "pause") {
+        item.status = "paused";
+        item.speed = "已暂停";
+        item.message = `已暂停，可从 ${formatFileSize(item.downloadedBytes)} 继续`;
+        refreshDownloadItems();
+        return;
+      }
+      if (runtime.abortReason === "cancel") {
+        removeDownloadItem(item.id);
+        return;
+      }
+    }
+
+    item.status = "paused";
+    item.speed = "已中断";
+    item.message = `${error.message || "下载中断"}，可继续`;
+    refreshDownloadItems();
+  }
+}
+
+function startDownload(file) {
+  const existing = downloadItems.value.find(
+    (item) => item.fileUrl === file.fileUrl && !["success"].includes(item.status)
+  );
+  if (existing) {
+    if (existing.status !== "downloading") {
+      runDownload(existing).catch((error) => {
+        existing.status = "paused";
+        existing.message = `${error.message || "下载中断"}，可继续`;
+        refreshDownloadItems();
+      });
+    }
+    return;
+  }
+
+  const downloadItem = {
+    id: createTaskId("download"),
+    kind: "download",
+    createdAt: Date.now(),
+    fileName: file.fileName,
+    fileUrl: file.fileUrl,
+    fileSize: file.fileSize || "未知大小",
+    percent: 0,
+    speed: "0 B/s",
+    status: "pending",
+    message: "等待下载",
+    downloadedBytes: 0,
+    totalBytes: 0,
+    eTag: "",
+    lastModified: ""
+  };
+  downloadItems.value = [downloadItem, ...downloadItems.value];
+
+  runDownload(downloadItem).catch((error) => {
+    downloadItem.status = "paused";
+    downloadItem.message = `${error.message || "下载中断"}，可继续`;
+    refreshDownloadItems();
+  });
+}
+
+function pauseDownload(id) {
+  const item = downloadItems.value.find((current) => current.id === id);
+  const runtime = downloadRuntimes.get(id);
+  if (!item || item.status !== "downloading" || !runtime?.controller) {
+    return;
+  }
+  runtime.abortReason = "pause";
+  runtime.controller.abort();
+}
+
+function resumeDownload(id) {
+  const item = downloadItems.value.find((current) => current.id === id);
+  if (!item || item.status === "downloading" || item.status === "success") {
+    return;
+  }
+  clearTaskCleanup(id);
+  runDownload(item).catch((error) => {
+    item.status = "paused";
+    item.message = `${error.message || "下载中断"}，可继续`;
+    refreshDownloadItems();
+  });
+}
+
+function cancelDownload(id) {
+  clearTaskCleanup(id);
+  const runtime = downloadRuntimes.get(id);
+  if (runtime?.controller) {
+    runtime.abortReason = "cancel";
+    runtime.controller.abort();
+    return;
+  }
+  removeDownloadItem(id);
 }
 
 function connectSse() {
@@ -268,8 +581,16 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   document.removeEventListener("paste", onGlobalPaste);
   eventSource?.close();
-  uploadCleanupTimers.forEach((timer) => clearTimeout(timer));
-  uploadCleanupTimers.clear();
+  taskCleanupTimers.forEach((timer) => clearTimeout(timer));
+  taskCleanupTimers.clear();
+  Array.from(downloadRuntimes.entries()).forEach(([id, runtime]) => {
+    runtime.abortReason = "cancel";
+    runtime.controller?.abort();
+    if (runtime.objectUrl) {
+      URL.revokeObjectURL(runtime.objectUrl);
+    }
+    downloadRuntimes.delete(id);
+  });
 });
 </script>
 
@@ -324,38 +645,85 @@ onBeforeUnmount(() => {
 
       <section class="panel stack">
         <UploadPanel @upload="uploadFiles" />
-        <FileTable :files="files" @delete="deleteFile" />
+        <FileTable :files="files" @delete="deleteFile" @download="startDownload" />
       </section>
     </main>
 
     <aside
-      v-if="uploadItems.length"
-      class="upload-float"
-      :class="{ collapsed: !uploadPanelExpanded }"
+      v-if="transferItems.length"
+      class="transfer-float"
+      :class="{ collapsed: !transferPanelExpanded }"
     >
       <button
         type="button"
-        class="upload-float-toggle"
-        @click="uploadPanelExpanded = !uploadPanelExpanded"
+        class="transfer-float-toggle"
+        @click="transferPanelExpanded = !transferPanelExpanded"
       >
-        <span>上传队列</span>
-        <strong>{{ uploadItems.length }}</strong>
+        <span>传输队列</span>
+        <div class="transfer-counts">
+          <em v-if="downloadCount">下 {{ downloadCount }}</em>
+          <em v-if="uploadCount">上 {{ uploadCount }}</em>
+          <strong>{{ transferItems.length }}</strong>
+        </div>
       </button>
 
-      <Transition name="upload-float-body">
-        <div v-if="uploadPanelExpanded" class="upload-float-body">
-          <div class="upload-list">
+      <Transition name="transfer-float-body">
+        <div v-if="transferPanelExpanded" class="transfer-float-body">
+          <div class="transfer-list">
             <article
-              v-for="item in uploadItems"
+              v-for="item in transferItems"
               :key="item.id"
-              class="upload-item"
-              :class="`is-${item.status}`"
+              class="transfer-item"
+              :class="[item.kind, `is-${item.status}`]"
             >
-              <div class="progress-shell">
-                <div class="progress-bar" :style="{ width: `${item.percent}%` }"></div>
-                <span>{{ item.fileName }} · {{ item.percent }}% · {{ item.speed }}</span>
+              <div class="transfer-item-head">
+                <span class="transfer-tag">
+                  {{ item.kind === "download" ? "下载" : "上传" }}
+                </span>
+                <strong>{{ item.fileName }}</strong>
               </div>
-              <p class="upload-status">{{ item.fileSize }} · {{ item.message }}</p>
+
+              <div class="progress-shell" :class="item.kind">
+                <div class="progress-bar" :style="{ width: `${item.percent}%` }"></div>
+                <span>{{ item.percent }}% · {{ item.speed }}</span>
+              </div>
+
+              <p class="transfer-status">{{ item.fileSize }} · {{ item.message }}</p>
+
+              <div v-if="item.kind === 'download'" class="transfer-actions">
+                <button
+                  v-if="item.status === 'downloading'"
+                  type="button"
+                  class="tiny-action subtle"
+                  @click="pauseDownload(item.id)"
+                >
+                  暂停
+                </button>
+                <button
+                  v-if="['paused', 'pending'].includes(item.status)"
+                  type="button"
+                  class="tiny-action primary"
+                  @click="resumeDownload(item.id)"
+                >
+                  继续
+                </button>
+                <button
+                  v-if="item.status !== 'success'"
+                  type="button"
+                  class="tiny-action danger"
+                  @click="cancelDownload(item.id)"
+                >
+                  取消
+                </button>
+                <button
+                  v-if="item.status === 'success'"
+                  type="button"
+                  class="tiny-action subtle"
+                  @click="removeDownloadItem(item.id)"
+                >
+                  关闭
+                </button>
+              </div>
             </article>
           </div>
         </div>
