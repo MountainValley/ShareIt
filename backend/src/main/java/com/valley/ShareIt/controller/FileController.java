@@ -6,6 +6,7 @@ import com.valley.ShareIt.utils.FileUtils;
 import com.valley.ShareIt.utils.SseClientsManager;
 import com.valley.ShareIt.utils.UploadMetadataStore;
 import com.valley.ShareIt.vo.DeleteFileRequest;
+import com.valley.ShareIt.vo.ChunkUploadCompleteRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -26,12 +27,15 @@ import org.springframework.http.server.ServletServerHttpResponse;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -48,6 +52,7 @@ import java.util.stream.Stream;
 @Slf4j
 public class FileController {
     private static final int DOWNLOAD_BUFFER_SIZE = 64 * 1024;
+    private static final String UPLOAD_CACHE_DIR_NAME = ".shareit-upload-cache";
     private final ResourceHttpMessageConverter resourceHttpMessageConverter = new ResourceHttpMessageConverter();
     private final ResourceRegionHttpMessageConverter resourceRegionHttpMessageConverter = new ResourceRegionHttpMessageConverter();
 
@@ -63,7 +68,7 @@ public class FileController {
             paths.filter(Files::isRegularFile) // 过滤掉非文件（如目录）
                     .forEach(path -> {
                         try {
-                            if (".DS_Store".equals(path.getFileName().toString()) || UploadMetadataStore.isMetadataFile(path)) {
+                            if (isIgnoredPath(path)) {
                                 return;
                             }
                             // 获取文件属性
@@ -189,6 +194,90 @@ public class FileController {
         }
     }
 
+    @PostMapping("upload/chunk")
+    public ResponseEntity<String> uploadChunk(
+            @RequestParam("uploadId") String uploadId,
+            @RequestParam("fileName") String fileName,
+            @RequestParam("chunkIndex") int chunkIndex,
+            @RequestParam("totalChunks") int totalChunks,
+            @RequestParam("totalSize") long totalSize,
+            @RequestParam("chunk") MultipartFile chunk
+    ) {
+        try {
+            validateChunkRequest(uploadId, fileName, chunkIndex, totalChunks, totalSize, chunk);
+            if (haveEnoughSpace(totalSize)) {
+                return ResponseEntity.badRequest().body("文件上传失败，剩余磁盘空间不足：" + FileUtils.formatFileSize(diskFreeSpaceConfig));
+            }
+
+            Path uploadDir = getChunkUploadDir(uploadId);
+            Files.createDirectories(uploadDir);
+            Path chunkPath = uploadDir.resolve(chunkIndex + ".part");
+            try (InputStream inputStream = chunk.getInputStream()) {
+                Files.copy(inputStream, chunkPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            log.info("文件分片上传完成：{} chunk {}/{}", fileName, chunkIndex + 1, totalChunks);
+            return ResponseEntity.ok("分片上传成功");
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (IOException e) {
+            log.error("文件分片上传失败", e);
+            return ResponseEntity.status(500).body("文件分片上传失败：" + e.getMessage());
+        }
+    }
+
+    @PostMapping("upload/complete")
+    public ResponseEntity<String> completeChunkUpload(@RequestBody ChunkUploadCompleteRequest request) {
+        try {
+            validateCompleteRequest(request);
+            if (haveEnoughSpace(request.getTotalSize())) {
+                return ResponseEntity.badRequest().body("文件上传失败，剩余磁盘空间不足：" + FileUtils.formatFileSize(diskFreeSpaceConfig));
+            }
+
+            Path uploadDir = getChunkUploadDir(request.getUploadId());
+            if (!Files.isDirectory(uploadDir)) {
+                return ResponseEntity.badRequest().body("分片上传不存在或已失效");
+            }
+
+            Path targetPath = Paths.get(WorkSpaceDirectory.getWorkDir(), request.getFileName());
+            Path assemblingPath = uploadDir.resolve("assembling.tmp");
+            Files.deleteIfExists(assemblingPath);
+
+            try (var outputStream = Files.newOutputStream(
+                    assemblingPath,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                    StandardOpenOption.WRITE
+            )) {
+                for (int chunkIndex = 0; chunkIndex < request.getTotalChunks(); chunkIndex++) {
+                    Path chunkPath = uploadDir.resolve(chunkIndex + ".part");
+                    if (!Files.exists(chunkPath)) {
+                        return ResponseEntity.badRequest().body("缺少分片：" + chunkIndex);
+                    }
+                    Files.copy(chunkPath, outputStream);
+                }
+            }
+
+            long assembledSize = Files.size(assemblingPath);
+            if (assembledSize != request.getTotalSize()) {
+                Files.deleteIfExists(assemblingPath);
+                return ResponseEntity.badRequest()
+                        .body("分片合并大小不匹配，期望 " + request.getTotalSize() + " 实际 " + assembledSize);
+            }
+
+            Files.move(assemblingPath, targetPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            deleteRecursively(uploadDir);
+            UploadMetadataStore.recordUpload(request.getFileName());
+            SseClientsManager.sendMsgToAllClients(MsgTypeEnum.FILE_CHANGED.name(), "", null);
+            log.info("文件分片合并完成：{}", request.getFileName());
+            return ResponseEntity.ok("文件上传成功！");
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (IOException e) {
+            log.error("文件分片合并失败", e);
+            return ResponseEntity.status(500).body("文件分片合并失败：" + e.getMessage());
+        }
+    }
+
     @PostMapping("/delete")
     public ResponseEntity<String> deleteFile(@RequestBody DeleteFileRequest request) {
         try {
@@ -209,6 +298,78 @@ public class FileController {
 
     private boolean haveEnoughSpace(long size) {
         return (FileUtils.getFreeSpace(WorkSpaceDirectory.getWorkDir()) - size) <= diskFreeSpaceConfig;
+    }
+
+    private static boolean isIgnoredPath(Path path) {
+        if (path == null) {
+            return true;
+        }
+        if (".DS_Store".equals(path.getFileName().toString()) || UploadMetadataStore.isMetadataFile(path)) {
+            return true;
+        }
+        for (Path segment : path) {
+            if (UPLOAD_CACHE_DIR_NAME.equals(segment.toString())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void validateChunkRequest(String uploadId, String fileName, int chunkIndex, int totalChunks, long totalSize, MultipartFile chunk) {
+        if (!StringUtils.hasText(uploadId)) {
+            throw new IllegalArgumentException("uploadId 不能为空");
+        }
+        if (!StringUtils.hasText(fileName)) {
+            throw new IllegalArgumentException("fileName 不能为空");
+        }
+        if (chunkIndex < 0 || totalChunks <= 0 || chunkIndex >= totalChunks) {
+            throw new IllegalArgumentException("分片索引非法");
+        }
+        if (totalSize <= 0) {
+            throw new IllegalArgumentException("文件大小非法");
+        }
+        if (chunk == null || chunk.isEmpty()) {
+            throw new IllegalArgumentException("分片内容不能为空");
+        }
+    }
+
+    private static void validateCompleteRequest(ChunkUploadCompleteRequest request) {
+        if (request == null || !StringUtils.hasText(request.getUploadId())) {
+            throw new IllegalArgumentException("uploadId 不能为空");
+        }
+        if (!StringUtils.hasText(request.getFileName())) {
+            throw new IllegalArgumentException("fileName 不能为空");
+        }
+        if (request.getTotalChunks() <= 0) {
+            throw new IllegalArgumentException("totalChunks 非法");
+        }
+        if (request.getTotalSize() <= 0) {
+            throw new IllegalArgumentException("totalSize 非法");
+        }
+    }
+
+    private static Path getChunkUploadDir(String uploadId) {
+        return Paths.get(WorkSpaceDirectory.getWorkDir(), UPLOAD_CACHE_DIR_NAME, uploadId);
+    }
+
+    private static void deleteRecursively(Path path) throws IOException {
+        if (path == null || !Files.exists(path)) {
+            return;
+        }
+        try (Stream<Path> paths = Files.walk(path)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(current -> {
+                try {
+                    Files.deleteIfExists(current);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        } catch (RuntimeException e) {
+            if (e.getCause() instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw e;
+        }
     }
 
     private static HttpHeaders buildDownloadHeaders(String fallbackName, String encodedFilename, String eTag, String lastModified) {

@@ -15,8 +15,10 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.http.HttpHeaders.ACCEPT_RANGES;
 import static org.springframework.http.HttpHeaders.CONTENT_LENGTH;
 import static org.springframework.http.HttpHeaders.CONTENT_RANGE;
@@ -26,7 +28,10 @@ import static org.springframework.http.HttpStatus.OK;
 import static org.springframework.http.HttpStatus.PARTIAL_CONTENT;
 import static org.springframework.http.HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import org.springframework.mock.web.MockMultipartFile;
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -50,6 +55,21 @@ class FileControllerDownloadTest {
     @AfterEach
     void tearDown() throws Exception {
         setWorkDirField(originalWorkDir);
+        Path metadataPath = tempDir.resolve(".shareit-upload-metadata.json");
+        if (Files.exists(metadataPath)) {
+            Files.delete(metadataPath);
+        }
+        Path uploadCache = tempDir.resolve(".shareit-upload-cache");
+        if (Files.exists(uploadCache)) {
+            try (var walk = Files.walk(uploadCache)) {
+                walk.sorted(Comparator.reverseOrder()).forEach(path -> {
+                    try {
+                        Files.deleteIfExists(path);
+                    } catch (Exception ignored) {
+                    }
+                });
+            }
+        }
     }
 
     @Test
@@ -122,6 +142,45 @@ class FileControllerDownloadTest {
         assertThat(result.getResponse().getHeader(CONTENT_RANGE)).isNull();
         assertThat(result.getResponse().getHeader(CONTENT_LENGTH)).isEqualTo("10");
         assertThat(result.getResponse().getContentAsString()).isEqualTo("0123456789");
+    }
+
+    @Test
+    void shouldAssembleFileWhenChunkUploadCompletes() throws Exception {
+        MockMultipartFile chunk0 = new MockMultipartFile("chunk", "chunk-0", "application/octet-stream", "hello ".getBytes(StandardCharsets.UTF_8));
+        MockMultipartFile chunk1 = new MockMultipartFile("chunk", "chunk-1", "application/octet-stream", "world".getBytes(StandardCharsets.UTF_8));
+
+        mockMvc.perform(multipart("/api/file/upload/chunk")
+                        .file(chunk0)
+                        .param("uploadId", "upload-1")
+                        .param("fileName", "chunked.txt")
+                        .param("chunkIndex", "0")
+                        .param("totalChunks", "2")
+                        .param("totalSize", "11"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(multipart("/api/file/upload/chunk")
+                        .file(chunk1)
+                        .param("uploadId", "upload-1")
+                        .param("fileName", "chunked.txt")
+                        .param("chunkIndex", "1")
+                        .param("totalChunks", "2")
+                        .param("totalSize", "11"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/file/upload/complete")
+                        .contentType(APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "uploadId": "upload-1",
+                                  "fileName": "chunked.txt",
+                                  "totalChunks": 2,
+                                  "totalSize": 11
+                                }
+                                """))
+                .andExpect(status().isOk());
+
+        assertThat(Files.readString(tempDir.resolve("chunked.txt"), StandardCharsets.UTF_8)).isEqualTo("hello world");
+        assertThat(Files.exists(tempDir.resolve(".shareit-upload-cache").resolve("upload-1"))).isFalse();
     }
 
     private static String getWorkDirField() throws Exception {

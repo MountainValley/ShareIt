@@ -5,6 +5,12 @@ import FileTable from "./components/FileTable.vue";
 import UploadPanel from "./components/UploadPanel.vue";
 import TextClipboard from "./components/TextClipboard.vue";
 
+const LARGE_FILE_THRESHOLD = 8 * 1024 * 1024;
+const UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024;
+const UPLOAD_PARALLEL_LIMIT = 3;
+const DOWNLOAD_PART_SIZE = 4 * 1024 * 1024;
+const DOWNLOAD_PARALLEL_LIMIT = 4;
+
 const files = ref([]);
 const text = ref("");
 const workspacePath = ref("");
@@ -103,7 +109,7 @@ function cleanupDownloadRuntime(id) {
   if (!runtime) {
     return;
   }
-  runtime.controller?.abort();
+  runtime.controllers.forEach((controller) => controller.abort());
   if (runtime.objectUrl) {
     URL.revokeObjectURL(runtime.objectUrl);
   }
@@ -119,13 +125,23 @@ function removeDownloadItem(id) {
 function requestRuntime(id) {
   if (!downloadRuntimes.has(id)) {
     downloadRuntimes.set(id, {
-      controller: null,
-      chunks: [],
+      controllers: [],
       objectUrl: "",
-      abortReason: ""
+      abortReason: "",
+      strategy: "single",
+      parts: [],
+      probeLoaded: false,
+      transferStartedAt: 0,
+      lastSampleAt: 0,
+      lastSampleBytes: 0,
+      lastRenderedSpeed: "0 B/s"
     });
   }
   return downloadRuntimes.get(id);
+}
+
+function resetRuntimeControllers(runtime) {
+  runtime.controllers = [];
 }
 
 function parseContentRange(contentRange) {
@@ -217,20 +233,42 @@ async function deleteFile(fileName) {
   });
 }
 
+function updateUploadProgress(item, loadedBytes, startedAt, message) {
+  const duration = Math.max((Date.now() - startedAt) / 1000, 0.1);
+  Object.assign(item, {
+    percent: Math.min(100, Math.round((loadedBytes / item.totalBytes) * 100)),
+    speed: formatSpeed(loadedBytes / duration),
+    status: "uploading",
+    message
+  });
+  refreshUploadItems();
+}
+
 async function uploadSingleFile(file) {
+  const chunked = file.size >= LARGE_FILE_THRESHOLD;
   const uploadItem = {
     id: createTaskId("upload"),
     kind: "upload",
     createdAt: Date.now(),
     fileName: file.name,
     fileSize: formatFileSize(file.size),
+    totalBytes: file.size,
     percent: 0,
     speed: "0 B/s",
     status: "uploading",
-    message: "正在上传"
+    message: chunked ? "准备分片上传" : "正在上传",
+    accelerated: chunked
   };
   uploadItems.value = [uploadItem, ...uploadItems.value];
 
+  if (chunked) {
+    await uploadLargeFile(file, uploadItem);
+  } else {
+    await uploadRegularFile(file, uploadItem);
+  }
+}
+
+async function uploadRegularFile(file, uploadItem) {
   const startedAt = Date.now();
   const formData = new FormData();
   formData.append("files", file);
@@ -243,14 +281,7 @@ async function uploadSingleFile(file) {
       if (!event.lengthComputable) {
         return;
       }
-      const duration = Math.max((Date.now() - startedAt) / 1000, 0.1);
-      Object.assign(uploadItem, {
-        percent: Math.round((event.loaded / event.total) * 100),
-        speed: formatSpeed(event.loaded / duration),
-        status: "uploading",
-        message: "正在上传"
-      });
-      refreshUploadItems();
+      updateUploadProgress(uploadItem, event.loaded, startedAt, "正在上传");
     });
 
     xhr.onload = () => {
@@ -289,6 +320,97 @@ async function uploadSingleFile(file) {
   });
 }
 
+async function uploadLargeFile(file, uploadItem) {
+  const uploadId = createTaskId("chunk");
+  const totalChunks = Math.ceil(file.size / UPLOAD_CHUNK_SIZE);
+  const startedAt = Date.now();
+  const chunkProgress = Array.from({ length: totalChunks }, () => 0);
+  let completedChunks = 0;
+  let nextChunkIndex = 0;
+
+  function refreshChunkUploadProgress() {
+    const uploadedBytes = chunkProgress.reduce((sum, value) => sum + value, 0);
+    updateUploadProgress(
+      uploadItem,
+      uploadedBytes,
+      startedAt,
+      `分片并发上传 ${completedChunks}/${totalChunks}`
+    );
+  }
+
+  async function uploadChunkAt(chunkIndex) {
+    const start = chunkIndex * UPLOAD_CHUNK_SIZE;
+    const end = Math.min(file.size, start + UPLOAD_CHUNK_SIZE);
+    const chunk = file.slice(start, end);
+
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append("uploadId", uploadId);
+      formData.append("fileName", file.name);
+      formData.append("chunkIndex", String(chunkIndex));
+      formData.append("totalChunks", String(totalChunks));
+      formData.append("totalSize", String(file.size));
+      formData.append("chunk", chunk, `${file.name}.part-${chunkIndex}`);
+      xhr.open("POST", "/api/file/upload/chunk");
+
+      xhr.upload.addEventListener("progress", (event) => {
+        if (!event.lengthComputable) {
+          return;
+        }
+        chunkProgress[chunkIndex] = event.loaded;
+        refreshChunkUploadProgress();
+      });
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          chunkProgress[chunkIndex] = chunk.size;
+          completedChunks += 1;
+          refreshChunkUploadProgress();
+          resolve();
+          return;
+        }
+        reject(new Error(xhr.responseText || "Chunk upload failed"));
+      };
+
+      xhr.onerror = () => reject(new Error("Chunk upload failed"));
+      xhr.send(formData);
+    });
+  }
+
+  async function chunkWorker() {
+    while (nextChunkIndex < totalChunks) {
+      const currentIndex = nextChunkIndex;
+      nextChunkIndex += 1;
+      await uploadChunkAt(currentIndex);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(UPLOAD_PARALLEL_LIMIT, totalChunks) }, () => chunkWorker())
+  );
+
+  await requestJson("/api/file/upload/complete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      uploadId,
+      fileName: file.name,
+      totalChunks,
+      totalSize: file.size
+    })
+  });
+
+  Object.assign(uploadItem, {
+    percent: 100,
+    speed: "完成",
+    status: "success",
+    message: "分片并发上传完成"
+  });
+  refreshUploadItems();
+  scheduleTaskCleanup(uploadItem.id, removeUploadItem);
+}
+
 async function uploadFiles(filesToUpload) {
   if (!filesToUpload?.length) {
     return;
@@ -301,31 +423,89 @@ async function uploadFiles(filesToUpload) {
   }
 }
 
-function updateDownloadProgress(item, loadedBytes, totalBytes, runtime) {
+function updateDownloadProgress(item, loadedBytes, runtime) {
   item.downloadedBytes = loadedBytes;
-  item.totalBytes = totalBytes;
-  item.fileSize = formatFileSize(totalBytes);
-  item.percent = totalBytes > 0 ? Math.min(100, Math.round((loadedBytes / totalBytes) * 100)) : 0;
+  item.fileSize = formatFileSize(item.totalBytes);
+  item.percent = item.totalBytes > 0 ? Math.min(100, Math.round((loadedBytes / item.totalBytes) * 100)) : 0;
 
   const now = Date.now();
-  const elapsed = Math.max((now - runtime.lastSampleAt) / 1000, 0.1);
-  const deltaBytes = loadedBytes - runtime.lastSampleBytes;
-  item.speed = formatSpeed(Math.max(deltaBytes, 0) / elapsed);
-  item.message = totalBytes > 0
-    ? `${formatFileSize(loadedBytes)} / ${formatFileSize(totalBytes)}`
+  const elapsedSinceSample = now - runtime.lastSampleAt;
+  if (elapsedSinceSample >= 250 || loadedBytes === item.totalBytes) {
+    const elapsed = Math.max(elapsedSinceSample / 1000, 0.1);
+    const deltaBytes = loadedBytes - runtime.lastSampleBytes;
+    runtime.lastRenderedSpeed = formatSpeed(Math.max(deltaBytes, 0) / elapsed);
+    runtime.lastSampleAt = now;
+    runtime.lastSampleBytes = loadedBytes;
+  }
+  item.speed = runtime.lastRenderedSpeed;
+  item.message = item.totalBytes > 0
+    ? `${formatFileSize(loadedBytes)} / ${formatFileSize(item.totalBytes)}`
     : `已下载 ${formatFileSize(loadedBytes)}`;
-
-  runtime.lastSampleAt = now;
-  runtime.lastSampleBytes = loadedBytes;
   refreshDownloadItems();
 }
 
-async function runDownload(item) {
+function createDownloadParts(totalBytes) {
+  const parts = [];
+  for (let start = 0; start < totalBytes; start += DOWNLOAD_PART_SIZE) {
+    const end = Math.min(totalBytes - 1, start + DOWNLOAD_PART_SIZE - 1);
+    parts.push({
+      start,
+      end,
+      loaded: 0,
+      chunks: []
+    });
+  }
+  return parts;
+}
+
+function getDownloadedBytes(runtime) {
+  return runtime.parts.reduce((sum, part) => sum + part.loaded, 0);
+}
+
+async function probeDownload(item) {
+  if (item.totalBytes > 0 && item.eTag) {
+    return;
+  }
+
   const runtime = requestRuntime(item.id);
-  const startOffset = item.downloadedBytes;
+  const controller = new AbortController();
+  runtime.controllers.push(controller);
+  const response = await fetch(item.fileUrl, {
+    headers: { Range: "bytes=0-0" },
+    signal: controller.signal
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Download probe failed");
+  }
+
+  item.fileName = extractFileName(response.headers.get("content-disposition") || "", item.fileName);
+  item.eTag = response.headers.get("etag") || item.eTag;
+  item.lastModified = response.headers.get("last-modified") || item.lastModified;
+
+  if (response.status === 206) {
+    const contentRange = parseContentRange(response.headers.get("content-range") || "");
+    if (contentRange?.total) {
+      item.totalBytes = contentRange.total;
+    }
+  } else {
+    item.totalBytes = Number(response.headers.get("content-length") || 0);
+  }
+
+  if (response.body) {
+    const reader = response.body.getReader();
+    while (!(await reader.read()).done) {
+      // Drain the probe response to free the connection.
+    }
+  }
+}
+
+async function runSingleDownload(item, runtime) {
+  const controller = new AbortController();
+  runtime.controllers.push(controller);
   const headers = {};
-  if (startOffset > 0) {
-    headers.Range = `bytes=${startOffset}-`;
+  if (item.downloadedBytes > 0) {
+    headers.Range = `bytes=${item.downloadedBytes}-`;
     if (item.eTag) {
       headers["If-Range"] = item.eTag;
     } else if (item.lastModified) {
@@ -333,90 +513,145 @@ async function runDownload(item) {
     }
   }
 
+  const response = await fetch(item.fileUrl, {
+    headers,
+    signal: controller.signal
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Download failed");
+  }
+
+  const contentDisposition = response.headers.get("content-disposition") || "";
+  item.fileName = extractFileName(contentDisposition, item.fileName);
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("当前浏览器不支持流式下载");
+  }
+
+  const chunks = runtime.parts[0].chunks;
+  let loadedBytes = item.downloadedBytes;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    chunks.push(value);
+    loadedBytes += value.byteLength;
+    runtime.parts[0].loaded = loadedBytes;
+    updateDownloadProgress(item, loadedBytes, runtime);
+  }
+
+  return new Blob(chunks, {
+    type: response.headers.get("content-type") || "application/octet-stream"
+  });
+}
+
+async function downloadPart(item, part, runtime) {
+  if (part.loaded > part.end - part.start) {
+    return;
+  }
+  const rangeStart = part.start + part.loaded;
+  const controller = new AbortController();
+  runtime.controllers.push(controller);
+
+  const headers = {
+    Range: `bytes=${rangeStart}-${part.end}`
+  };
+  if (item.eTag) {
+    headers["If-Range"] = item.eTag;
+  } else if (item.lastModified) {
+    headers["If-Range"] = item.lastModified;
+  }
+
+  const response = await fetch(item.fileUrl, {
+    headers,
+    signal: controller.signal
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Download failed");
+  }
+  if (response.status !== 206) {
+    throw new Error("服务器未返回分段数据，无法并发下载");
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("当前浏览器不支持流式下载");
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    part.chunks.push(value);
+    part.loaded += value.byteLength;
+    updateDownloadProgress(item, getDownloadedBytes(runtime), runtime);
+  }
+}
+
+async function runParallelDownload(item, runtime) {
+  const pendingParts = runtime.parts.filter((part) => part.loaded <= part.end - part.start);
+  for (let index = 0; index < pendingParts.length; index += DOWNLOAD_PARALLEL_LIMIT) {
+    const batch = pendingParts.slice(index, index + DOWNLOAD_PARALLEL_LIMIT);
+    await Promise.all(batch.map((part) => downloadPart(item, part, runtime)));
+  }
+
+  return new Blob(
+    runtime.parts.flatMap((part) => part.chunks),
+    { type: "application/octet-stream" }
+  );
+}
+
+async function runDownload(item) {
+  const runtime = requestRuntime(item.id);
   runtime.abortReason = "";
-  runtime.controller = new AbortController();
+  resetRuntimeControllers(runtime);
+  runtime.transferStartedAt = Date.now();
   runtime.lastSampleAt = Date.now();
   runtime.lastSampleBytes = item.downloadedBytes;
+  runtime.lastRenderedSpeed = "0 B/s";
 
   item.status = "downloading";
   item.speed = "0 B/s";
-  item.message = startOffset > 0 ? "继续下载中" : "正在下载";
+  item.message = item.downloadedBytes > 0 ? "继续下载中" : "正在下载";
   refreshDownloadItems();
 
   try {
-    const response = await fetch(item.fileUrl, {
-      headers,
-      signal: runtime.controller.signal
-    });
+    await probeDownload(item);
 
-    if (!response.ok) {
-      const message = await response.text();
-      throw new Error(message || "Download failed");
+    if (!runtime.probeLoaded) {
+      runtime.strategy = item.totalBytes >= LARGE_FILE_THRESHOLD ? "parallel" : "single";
+      runtime.parts = runtime.strategy === "parallel"
+        ? createDownloadParts(item.totalBytes)
+        : [{ start: 0, end: Math.max(item.totalBytes - 1, 0), loaded: item.downloadedBytes, chunks: [] }];
+      runtime.probeLoaded = true;
+      item.accelerated = runtime.strategy === "parallel";
     }
 
-    const contentDisposition = response.headers.get("content-disposition") || "";
-    item.fileName = extractFileName(contentDisposition, item.fileName);
-    item.eTag = response.headers.get("etag") || item.eTag;
-    item.lastModified = response.headers.get("last-modified") || item.lastModified;
-
-    let totalBytes = item.totalBytes;
-    if (response.status === 206) {
-      const contentRange = parseContentRange(response.headers.get("content-range") || "");
-      if (contentRange?.total) {
-        totalBytes = contentRange.total;
-      }
+    let blob;
+    if (runtime.strategy === "parallel") {
+      blob = await runParallelDownload(item, runtime);
     } else {
-      const fullLength = Number(response.headers.get("content-length") || 0);
-      if (fullLength > 0) {
-        totalBytes = fullLength;
-      }
-      if (startOffset > 0) {
-        runtime.chunks = [];
-        item.downloadedBytes = 0;
-        item.percent = 0;
-      }
+      blob = await runSingleDownload(item, runtime);
     }
 
-    if (!totalBytes) {
-      const fallbackLength = Number(response.headers.get("content-length") || 0);
-      totalBytes = response.status === 206 ? startOffset + fallbackLength : fallbackLength;
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new Error("当前浏览器不支持流式下载");
-    }
-
-    let loadedBytes = item.downloadedBytes;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      runtime.chunks.push(value);
-      loadedBytes += value.byteLength;
-      updateDownloadProgress(item, loadedBytes, totalBytes, runtime);
-    }
-
-    const blob = new Blob(runtime.chunks, {
-      type: response.headers.get("content-type") || "application/octet-stream"
-    });
     saveBlob(blob, item.fileName, item.id);
-    runtime.chunks = [];
-    runtime.controller = null;
+    resetRuntimeControllers(runtime);
 
     Object.assign(item, {
-      totalBytes,
-      downloadedBytes: totalBytes,
+      downloadedBytes: item.totalBytes,
       percent: 100,
       speed: "完成",
       status: "success",
-      message: "下载完成"
+      message: runtime.strategy === "parallel" ? "并发下载完成" : "下载完成"
     });
     refreshDownloadItems();
     scheduleTaskCleanup(item.id, removeDownloadItem);
   } catch (error) {
-    runtime.controller = null;
+    resetRuntimeControllers(runtime);
     if (error?.name === "AbortError") {
       if (runtime.abortReason === "pause") {
         item.status = "paused";
@@ -440,15 +675,11 @@ async function runDownload(item) {
 
 function startDownload(file) {
   const existing = downloadItems.value.find(
-    (item) => item.fileUrl === file.fileUrl && !["success"].includes(item.status)
+    (item) => item.fileUrl === file.fileUrl && item.status !== "success"
   );
   if (existing) {
     if (existing.status !== "downloading") {
-      runDownload(existing).catch((error) => {
-        existing.status = "paused";
-        existing.message = `${error.message || "下载中断"}，可继续`;
-        refreshDownloadItems();
-      });
+      runDownload(existing).catch(() => {});
     }
     return;
   }
@@ -467,25 +698,22 @@ function startDownload(file) {
     downloadedBytes: 0,
     totalBytes: 0,
     eTag: "",
-    lastModified: ""
+    lastModified: "",
+    accelerated: false
   };
   downloadItems.value = [downloadItem, ...downloadItems.value];
 
-  runDownload(downloadItem).catch((error) => {
-    downloadItem.status = "paused";
-    downloadItem.message = `${error.message || "下载中断"}，可继续`;
-    refreshDownloadItems();
-  });
+  runDownload(downloadItem).catch(() => {});
 }
 
 function pauseDownload(id) {
   const item = downloadItems.value.find((current) => current.id === id);
   const runtime = downloadRuntimes.get(id);
-  if (!item || item.status !== "downloading" || !runtime?.controller) {
+  if (!item || item.status !== "downloading" || !runtime) {
     return;
   }
   runtime.abortReason = "pause";
-  runtime.controller.abort();
+  runtime.controllers.forEach((controller) => controller.abort());
 }
 
 function resumeDownload(id) {
@@ -494,19 +722,15 @@ function resumeDownload(id) {
     return;
   }
   clearTaskCleanup(id);
-  runDownload(item).catch((error) => {
-    item.status = "paused";
-    item.message = `${error.message || "下载中断"}，可继续`;
-    refreshDownloadItems();
-  });
+  runDownload(item).catch(() => {});
 }
 
 function cancelDownload(id) {
   clearTaskCleanup(id);
   const runtime = downloadRuntimes.get(id);
-  if (runtime?.controller) {
+  if (runtime) {
     runtime.abortReason = "cancel";
-    runtime.controller.abort();
+    runtime.controllers.forEach((controller) => controller.abort());
     return;
   }
   removeDownloadItem(id);
@@ -585,7 +809,7 @@ onBeforeUnmount(() => {
   taskCleanupTimers.clear();
   Array.from(downloadRuntimes.entries()).forEach(([id, runtime]) => {
     runtime.abortReason = "cancel";
-    runtime.controller?.abort();
+    runtime.controllers.forEach((controller) => controller.abort());
     if (runtime.objectUrl) {
       URL.revokeObjectURL(runtime.objectUrl);
     }
@@ -661,9 +885,9 @@ onBeforeUnmount(() => {
       >
         <span>传输队列</span>
         <div class="transfer-counts">
-          <em v-if="downloadCount">下 {{ downloadCount }}</em>
-          <em v-if="uploadCount">上 {{ uploadCount }}</em>
-          <strong>{{ transferItems.length }}</strong>
+          <em v-if="downloadCount" class="download">下载 {{ downloadCount }}</em>
+          <em v-if="uploadCount" class="upload">上传 {{ uploadCount }}</em>
+          <strong>总 {{ transferItems.length }}</strong>
         </div>
       </button>
 
@@ -681,6 +905,7 @@ onBeforeUnmount(() => {
                   {{ item.kind === "download" ? "下载" : "上传" }}
                 </span>
                 <strong>{{ item.fileName }}</strong>
+                <span v-if="item.accelerated" class="transfer-bolt" title="大文件加速">⚡</span>
               </div>
 
               <div class="progress-shell" :class="item.kind">
